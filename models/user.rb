@@ -8,4 +8,8 @@
 #
 class User < Sequel::Model
   many_to_one :template
+
+  def to_h
+    values.map {|k, e| e.is_a?(BigDecimal) ? [k, e.to_f.to_s] : [k, e]}.to_h
+  end
 end

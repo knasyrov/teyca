@@ -56,6 +56,48 @@ class App < Sinatra::Base
     end
   end
 
+  def mapper(pos)
+    product = Product[pos[:id]]
+
+    _discount = template.discount
+    _cashback = template.cashback
+    case product&.type
+    when 'noloyalty'
+      _discount = 0
+      _cashback = 0
+    when 'discount'
+      _discount += product.value.to_i
+    when 'increased_cashback'
+      _cashback += product.value.to_i
+    end
+
+    
+    price = pos[:price]
+    amount = price * pos[:quantity]
+
+    {
+      id: pos[:id],
+      price: price,
+      quantity: pos[:quantity],
+      amount: amount,
+
+      type: product&.type,
+      value: product&.value,
+      type_desc: type_desc(product),
+      discount_percent: _discount.to_f,
+      discount_summ: amount * (_discount / 100.0),
+
+      cashback: (amount - amount * (_discount / 100.0))*(_cashback/100.0),
+    }
+  end
+
+
+  
+  post '/submit' do
+
+  end
+
+
   post '/operation' do
     content_type :json
     begin
@@ -64,58 +106,40 @@ class App < Sinatra::Base
 
       user_id = @request_payload[:user_id]
       user = User[user_id]
-      raise 'Title missing' if user.nil?
+      raise 'User missing' if user.nil?
     
-    s = []
-    #if user
+  
       template = user.template
-      puts template.inspect
       positions =  @request_payload[:positions]
-      cashback = template[:cashback]&.to_i#/100.0
-      discount = template[:discount]&.to_i#/100.0
-
-      positions.each_with_index do |pos, idx|
-        product = Product[pos[:id]] #.where(type: 'increased_cashback')
-
-        discount_from_product = Product.find(id: pos[:id], type: 'discount')&.value&.to_i
-        _discount = discount + (discount_from_product || 0)
-
-        increased_cashback = Product.find(id: pos[:id], type: 'increased_cashback')&.value&.to_i
-        _cashback = cashback + (increased_cashback || 0)
-        #_cashback =  increased_cashback if increased_cashback
 
 
-        if product&.type == 'noloyalty'
+      s = positions.map do |pos|
+        mapper(pos, template)
+      end
+=begin
+        product = Product[pos[:id]]
+
+        _discount = template.discount
+        _cashback = template.cashback
+        case product&.type
+        when 'noloyalty'
           _discount = 0
           _cashback = 0
+        when 'discount'
+          _discount += product.value.to_i
+        when 'increased_cashback'
+          _cashback += product.value.to_i
         end
 
         
-
         price = pos[:price]
         amount = price * pos[:quantity]
 
-        _price = price - _discount
-        _amount = _price * pos[:quantity]
-=begin
-        type_desc = case product&.type
-        when 'noloyalty'
-          "Не участвует в системе лояльности"
-        when 'discount'
-          "Дополнительная скидка #{product&.value}%"
-        when 'increased_cashback'
-          "Дополнительный кэшбек #{product&.value}%"
-        else
-          nil
-        end
-=end
-        puts "---> price - #{price}, discount = #{_discount/100.0}, cashback = #{_cashback/100.0}"
-
-        s << {
+        {
           id: pos[:id],
           price: price,
           quantity: pos[:quantity],
-          amount: price * pos[:quantity],
+          amount: amount,
 
           type: product&.type,
           value: product&.value,
@@ -123,20 +147,16 @@ class App < Sinatra::Base
           discount_percent: _discount.to_f,
           discount_summ: amount * (_discount / 100.0),
 
-          price2: amount * (_discount / 100.0) * ((100.0-_cashback)/100.0),
-          _amount: _amount,
-
           cashback: (amount - amount * (_discount / 100.0))*(_cashback/100.0),
-          total_cashback: _amount * (_cashback / 100.0),
         }
-        puts "#{idx} - #{product.inspect} - #{amount} - #{_cashback} - #{amount * (_cashback / 100.0)}"
+
       end
-    #end
+=end
 
-    total_discount = s.reduce(0) {|sum, e| sum += e[:discount_summ]}
-    total_sum = s.reduce(0) {|sum, e| sum += e[:amount]}
+      total_discount = s.reduce(0) {|sum, e| sum += e[:discount_summ]}
+      total_sum = s.reduce(0) {|sum, e| sum += e[:amount]}
 
-    total_cashback =  s.reduce(0) {|sum, e| sum += e[:cashback]}
+      total_cashback =  s.reduce(0) {|sum, e| sum += e[:cashback]}
 
 =begin
     o = Operation.new
@@ -150,7 +170,7 @@ class App < Sinatra::Base
     #o.done
     o.save
 =end
-    puts "cashback - #{user.template[:cashback]}% - #{user.template[:cashback]/100.0}" 
+      puts "cashback - #{user.template[:cashback]}% - #{user.template[:cashback]/100.0}" 
 
       PARAMS_TO_SCRUB = [ :price2, :_amount, :cashback, :total_cashback, :amount ]
 
