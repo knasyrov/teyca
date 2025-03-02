@@ -4,10 +4,13 @@ Bundler.require
 require 'sinatra/json'
 require "sinatra/namespace"
 
-Sequel.connect('sqlite://test.db')
+DB = Sequel.connect('sqlite://test.db')
 Dir["#{File.dirname(__FILE__)}/models/**/*.rb"].each {|file| require file }
 
 class App < Sinatra::Base
+  POSITION_PARAMS_TO_SCRUB = [ :cashback, :amount ].freeze
+  OPERATION_PARAMS_TO_SCRUB = [] #[ :id, :done, :allowed_write_off ]
+
   configure do
     set :root, File.dirname(__FILE__)
     register Sinatra::Namespace
@@ -43,6 +46,109 @@ class App < Sinatra::Base
     end
   end
 
+  post '/submit' do
+    content_type :json
+    #begin
+      request.body.rewind
+      request_payload = JSON.parse(request.body.read, symbolize_names: true)
+
+      operation = Operation[request_payload[:operation_id]]
+      raise 'Operation not found' if operation.nil?
+      #raise 'Operation already complete' if operation.done
+
+      user = User[request_payload.dig(:user, :id)]
+      raise 'User no found' if user.nil?
+
+      raise "Not enough points to write off!" if user.bonus < request_payload[:write_off]
+
+      DB.transaction do
+        operation.write_off = request_payload[:write_off]
+        operation.done = true
+        operation.save
+
+        user.bonus -= request_payload[:write_off]
+        user.save
+      end
+
+      status 200
+      json({
+        status: 200,
+        message: 'Данные успешно обновлены',
+        operation: operation.to_h.except(*OPERATION_PARAMS_TO_SCRUB)
+      })
+
+    #rescue StandardError => e
+    #  status 400
+    #  { error: e.message }.to_json
+    #end
+  end
+
+  
+
+  post '/operation' do
+    content_type :json
+    begin
+      request.body.rewind
+      request_payload = JSON.parse(request.body.read, symbolize_names: true)
+
+      user_id = request_payload[:user_id]
+      positions =  request_payload[:positions]
+
+      user = User[user_id]
+      raise 'User missing' if user.nil?
+    
+      template = user.template
+      positions.map! { |pos| position_mapper(pos, template) }
+
+      total_discount = positions.reduce(0) {|sum, e| sum += e[:discount_summ]}.round.to_f
+      total_cashback =  positions.filter {|e| e[:type] != 'noloyalty' }.reduce(0) {|sum, e| sum += e[:cashback]}.round.to_f
+
+      total_sum = 0 #positions.reduce(0) {|sum, e| sum += e[:amount]}.round.to_f
+      
+      allowed_summ = positions.filter {|e| e[:type] != 'noloyalty' }.reduce(0) { |sum, e| sum += (e[:amount]) * (1 - e[:discount_percent]/100.0) }.round.to_f
+      cashback_percent = total_sum == 0.0 ? 0.0 : total_cashback / total_sum
+      discount_percent = total_sum == 0.0 ? 0.0 : total_discount / total_sum
+
+      operation = Operation.new(
+        user_id: user_id,
+        cashback: total_cashback,
+        cashback_percent: (total_cashback*100).round(2),
+        discount: total_discount,
+        discount_percent: (discount_percent*100).round(2),
+        check_summ: total_sum,
+        done: false,
+        allowed_write_off: total_sum > user.bonus ? user.bonus : total_sum 
+      ).save
+
+      puts '--->', operation.inspect, ',,,,'
+
+      status 200
+      json({
+        status: 200,
+        user: user.to_h,
+        operation_id: operation.id,
+        summ: total_sum - total_discount,
+        positions: positions.map {|e| e.except(*POSITION_PARAMS_TO_SCRUB)},
+        discount: {
+          summ: total_discount,
+          value: (discount_percent * 100.0).round(2).to_s + '%'
+        },
+        cashback: {
+          existed_summ: user.bonus.to_i,
+          allowed_summ: allowed_summ,
+          value: (cashback_percent * 100.0).round(2).to_s + '%',
+          will_add: total_cashback.to_i
+        }
+      })
+
+    rescue StandardError => e
+      status 400
+      { error: e.message }.to_json
+    end
+  end
+
+  private
+
   def type_desc(product = nil)
     case product&.type
     when 'noloyalty'
@@ -56,153 +162,41 @@ class App < Sinatra::Base
     end
   end
 
-  def mapper(pos)
-    product = Product[pos[:id]]
+  def position_mapper(position, template)
+    product = Product[position[:id]]
 
-    _discount = template.discount
-    _cashback = template.cashback
+    discount = template.discount
+    cashback = template.cashback
     case product&.type
     when 'noloyalty'
-      _discount = 0
-      _cashback = 0
+      discount = 0
+      cashback = 0
     when 'discount'
-      _discount += product.value.to_i
+      discount += product.value.to_i
     when 'increased_cashback'
-      _cashback += product.value.to_i
+      cashback += product.value.to_i
     end
 
     
-    price = pos[:price]
-    amount = price * pos[:quantity]
+    price = position[:price]
+    amount = price * position[:quantity]
+    discount_summ = amount * (discount / 100.0)
 
-    {
-      id: pos[:id],
+    s = {
+      id: position[:id],
       price: price,
-      quantity: pos[:quantity],
-      amount: amount,
-
+      quantity: position[:quantity],
       type: product&.type,
       value: product&.value,
       type_desc: type_desc(product),
-      discount_percent: _discount.to_f,
-      discount_summ: amount * (_discount / 100.0),
-
-      cashback: (amount - amount * (_discount / 100.0))*(_cashback/100.0),
-    }
-  end
-
-
-  
-  post '/submit' do
-
-  end
-
-
-  post '/operation' do
-    content_type :json
-    begin
-      request.body.rewind
-      @request_payload = JSON.parse(request.body.read, symbolize_names: true)
-
-      user_id = @request_payload[:user_id]
-      user = User[user_id]
-      raise 'User missing' if user.nil?
+      discount_percent: discount.to_f,
+      discount_summ: discount_summ,
     
-  
-      template = user.template
-      positions =  @request_payload[:positions]
-
-
-      s = positions.map do |pos|
-        mapper(pos, template)
-      end
-=begin
-        product = Product[pos[:id]]
-
-        _discount = template.discount
-        _cashback = template.cashback
-        case product&.type
-        when 'noloyalty'
-          _discount = 0
-          _cashback = 0
-        when 'discount'
-          _discount += product.value.to_i
-        when 'increased_cashback'
-          _cashback += product.value.to_i
-        end
-
-        
-        price = pos[:price]
-        amount = price * pos[:quantity]
-
-        {
-          id: pos[:id],
-          price: price,
-          quantity: pos[:quantity],
-          amount: amount,
-
-          type: product&.type,
-          value: product&.value,
-          type_desc: type_desc(product),
-          discount_percent: _discount.to_f,
-          discount_summ: amount * (_discount / 100.0),
-
-          cashback: (amount - amount * (_discount / 100.0))*(_cashback/100.0),
-        }
-
-      end
-=end
-
-      total_discount = s.reduce(0) {|sum, e| sum += e[:discount_summ]}
-      total_sum = s.reduce(0) {|sum, e| sum += e[:amount]}
-
-      total_cashback =  s.reduce(0) {|sum, e| sum += e[:cashback]}
-
-=begin
-    o = Operation.new
-    o.user_id = User.last.id
-    o.cashback = 0
-    o.cashback_percent = 0
-    o.discount = 0
-    o.discount_percent = 0
-    #o.write_off
-    o.check_summ = 0
-    #o.done
-    o.save
-=end
-      puts "cashback - #{user.template[:cashback]}% - #{user.template[:cashback]/100.0}" 
-
-      PARAMS_TO_SCRUB = [ :price2, :_amount, :cashback, :total_cashback, :amount ]
-
-      status 200
-      json({
-        status: 200,
-        user: user.values.map {|k, e| e.is_a?(BigDecimal) ? [k, e.to_f.to_s] : [k, e]}.to_h,
-        operation_id: 23,
-        #cashback: total_cashback,
-        #cashback_percent: "#{(total_cashback.to_f/total_sum.to_f * 100.0).round(2)} %",
-        #discount: 0,
-        #discount_percent: 0,
-        #template: user.template.values,
-        summ: total_sum - total_discount,
-        positions: s.map {|e| e.except(*PARAMS_TO_SCRUB)},
-        #total_sum: total_sum,
-        #total_discount: total_discount,
-        discount: {
-          summ: total_discount,
-          value: ((1-(total_sum - total_discount)/total_sum)*100).round(2).to_s + '%'
-        },
-        cashback: {
-          existed_summ: user.bonus.to_i,
-          allowed_summ: (total_cashback/user.bonus).to_s('F'),
-          value: (total_cashback.to_i/total_sum.to_f*100).round(2).to_s + '%',
-          will_add: total_cashback.to_i
-        }
-      })
-
-    rescue StandardError => e
-      status 400
-      { error: e.message }.to_json
-    end
+      amount: amount,
+      cashback: (amount - discount_summ) * (cashback / 100.0),
+    }
+    puts s.inspect
+    s
   end
+
 end
