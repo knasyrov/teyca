@@ -1,0 +1,4 @@
+Запуск
+```
+bundle exec rackup
+```
