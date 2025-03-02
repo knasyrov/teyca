@@ -4,7 +4,7 @@ Bundler.require
 require 'sinatra/json'
 require "sinatra/namespace"
 
-DB = Sequel.connect('sqlite://test.db')
+DB = Sequel.connect('sqlite://db/test.db')
 Dir["#{File.dirname(__FILE__)}/models/**/*.rb"].each {|file| require file }
 
 class App < Sinatra::Base
