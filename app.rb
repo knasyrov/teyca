@@ -9,7 +9,7 @@ Dir["#{File.dirname(__FILE__)}/models/**/*.rb"].each {|file| require file }
 
 class App < Sinatra::Base
   POSITION_PARAMS_TO_SCRUB = [ :cashback, :amount ].freeze
-  OPERATION_PARAMS_TO_SCRUB = [] #[ :id, :done, :allowed_write_off ]
+  OPERATION_PARAMS_TO_SCRUB = [ :id, :done, :allowed_write_off ]
 
   configure do
     set :root, File.dirname(__FILE__)
@@ -48,13 +48,13 @@ class App < Sinatra::Base
 
   post '/submit' do
     content_type :json
-    #begin
+    begin
       request.body.rewind
       request_payload = JSON.parse(request.body.read, symbolize_names: true)
 
       operation = Operation[request_payload[:operation_id]]
       raise 'Operation not found' if operation.nil?
-      #raise 'Operation already complete' if operation.done
+      raise 'Operation already complete' if operation.done
 
       user = User[request_payload.dig(:user, :id)]
       raise 'User no found' if user.nil?
@@ -63,10 +63,13 @@ class App < Sinatra::Base
 
       DB.transaction do
         operation.write_off = request_payload[:write_off]
+        operation.check_summ -= request_payload[:write_off]
+        operation.cashback = operation.check_summ * operation.cashback_percent
         operation.done = true
         operation.save
 
         user.bonus -= request_payload[:write_off]
+        user.bonus += operation.cashback
         user.save
       end
 
@@ -77,10 +80,10 @@ class App < Sinatra::Base
         operation: operation.to_h.except(*OPERATION_PARAMS_TO_SCRUB)
       })
 
-    #rescue StandardError => e
-    #  status 400
-    #  { error: e.message }.to_json
-    #end
+    rescue StandardError => e
+      status 400
+      { error: e.message }.to_json
+    end
   end
 
   
@@ -103,31 +106,31 @@ class App < Sinatra::Base
       total_discount = positions.reduce(0) {|sum, e| sum += e[:discount_summ]}.round.to_f
       total_cashback =  positions.filter {|e| e[:type] != 'noloyalty' }.reduce(0) {|sum, e| sum += e[:cashback]}.round.to_f
 
-      total_sum = 0 #positions.reduce(0) {|sum, e| sum += e[:amount]}.round.to_f
+      total_sum = positions.reduce(0) {|sum, e| sum += e[:amount]}.round.to_f
       
       allowed_summ = positions.filter {|e| e[:type] != 'noloyalty' }.reduce(0) { |sum, e| sum += (e[:amount]) * (1 - e[:discount_percent]/100.0) }.round.to_f
       cashback_percent = total_sum == 0.0 ? 0.0 : total_cashback / total_sum
       discount_percent = total_sum == 0.0 ? 0.0 : total_discount / total_sum
 
+      check_summ = total_sum - total_discount
+
       operation = Operation.new(
         user_id: user_id,
         cashback: total_cashback,
-        cashback_percent: (total_cashback*100).round(2),
+        cashback_percent: cashback_percent.round(4),
         discount: total_discount,
-        discount_percent: (discount_percent*100).round(2),
-        check_summ: total_sum,
+        discount_percent: discount_percent.round(4),
+        check_summ: check_summ,
         done: false,
-        allowed_write_off: total_sum > user.bonus ? user.bonus : total_sum 
+        allowed_write_off: check_summ > user.bonus ? user.bonus : check_summ 
       ).save
-
-      puts '--->', operation.inspect, ',,,,'
 
       status 200
       json({
         status: 200,
         user: user.to_h,
         operation_id: operation.id,
-        summ: total_sum - total_discount,
+        summ: check_summ,
         positions: positions.map {|e| e.except(*POSITION_PARAMS_TO_SCRUB)},
         discount: {
           summ: total_discount,
@@ -182,7 +185,7 @@ class App < Sinatra::Base
     amount = price * position[:quantity]
     discount_summ = amount * (discount / 100.0)
 
-    s = {
+    {
       id: position[:id],
       price: price,
       quantity: position[:quantity],
@@ -195,8 +198,6 @@ class App < Sinatra::Base
       amount: amount,
       cashback: (amount - discount_summ) * (cashback / 100.0),
     }
-    puts s.inspect
-    s
   end
 
 end
